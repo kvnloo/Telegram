@@ -294,6 +294,7 @@ import org.telegram.ui.Components.SizeNotifierFrameLayoutPhoto;
 import org.telegram.ui.Components.SpeedIconDrawable;
 import org.telegram.ui.Components.StickersAlert;
 import org.telegram.ui.Components.TextViewSwitcher;
+import org.telegram.ui.Components.TiledImageOverlay;
 import org.telegram.ui.Components.ThanosEffect;
 import org.telegram.ui.Components.Tooltip;
 import org.telegram.ui.Components.TranslateAlert2;
@@ -2113,6 +2114,10 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private float minY;
     private float maxY;
     private boolean canZoom = true;
+    private TiledImageOverlay tiledOverlay;
+    private MessageObject tiledMessage;
+    private File tiledFile;
+    private long tiledCheckTime;
     private boolean changingPage;
     private boolean zooming;
     private boolean moving;
@@ -18665,6 +18670,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     private void onPhotoClosed(PlaceProviderObject object) {
+        if (tiledOverlay != null) {
+            tiledOverlay.release();
+        }
+        tiledMessage = null;
+        tiledFile = null;
         if (doneButtonPressed) {
             releasePlayer(true);
         }
@@ -19226,7 +19236,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             maskPaintViewTouched = 0;
             if (zooming) {
                 invalidCoords = true;
-                float maxScale = sendPhotoType == SELECT_TYPE_STICKER ? 10.0f : 3.0f;
+                float maxScale = sendPhotoType == SELECT_TYPE_STICKER ? 10.0f : getMaxZoom();
                 float minScale = sendPhotoType == SELECT_TYPE_STICKER ? 0.33f : 1f;
                 if (scale < minScale) {
                     updateMinMax(minScale);
@@ -20428,6 +20438,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             stickerMakerView.drawOutline(canvas, false, containerView, switchingToMode != -1);
             centerImage.setAlpha(alpha);
             centerImage.draw(canvas);
+            if (!mirror && currentMirror <= 0 && alpha >= 1f) {
+                drawTiles(canvas);
+            }
             stickerMakerView.drawOutline(canvas, true, containerView, switchingToMode != -1);
             stickerMakerView.drawSegmentBorderPath(canvas, centerImage, centerImageTransform, containerView);
             centerImageTransformLocked = true;
@@ -20435,6 +20448,55 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (restore) {
             canvas.restore();
         }
+    }
+
+    private static boolean isTileable(MessageObject m) {
+        if (m.isVideo() || m.isGif() || m.isAnyKindOfSticker()) {
+            return false;
+        }
+        if (m.isPhoto()) {
+            return true;
+        }
+        TLRPC.Document d = m.getDocument();
+        String mime = d == null || d.mime_type == null ? "" : d.mime_type;
+        return mime.equals("image/jpeg") || mime.equals("image/png") || mime.equals("image/webp") || mime.equals("image/heic") || mime.equals("image/heif");
+    }
+
+    // Large local images: draw full-resolution region tiles over the downscaled preview while zoomed in.
+    private void drawTiles(Canvas canvas) {
+        MessageObject m = currentEditMode == EDIT_MODE_NONE && !isCurrentVideo && centerImage.getInvert() == 0 ? currentMessageObject : null;
+        if (m == null || !isTileable(m)) {
+            if (tiledOverlay != null) {
+                tiledOverlay.setSource(null, 0);
+            }
+            tiledMessage = null;
+            tiledFile = null;
+            return;
+        }
+        if (tiledOverlay == null) {
+            tiledOverlay = new TiledImageOverlay(() -> {
+                if (containerView != null) {
+                    containerView.invalidate();
+                }
+            });
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (m != tiledMessage || tiledFile == null && now - tiledCheckTime > 1000) {
+            tiledMessage = m;
+            tiledCheckTime = now;
+            File f = FileLoader.getInstance(currentAccount).getPathToMessage(m.messageOwner);
+            tiledFile = f != null && f.exists() ? f : null;
+        }
+        tiledOverlay.setSource(tiledFile, centerImage.getOrientation());
+        tiledOverlay.draw(canvas, centerImage.getImageX(), centerImage.getImageY(), centerImage.getImageWidth(), centerImage.getImageHeight(),
+                Math.max(centerImage.getBitmapWidth(), centerImage.getBitmapHeight()));
+    }
+
+    private float getMaxZoom() {
+        if (tiledOverlay == null || tiledMessage == null || tiledMessage != currentMessageObject || currentEditMode != EDIT_MODE_NONE) {
+            return 3.0f;
+        }
+        return Math.min(100f, Math.max(3.0f, tiledOverlay.maxScale(centerImage.getImageWidth())));
     }
 
     private void drawProgress(Canvas canvas, float translateX, float currentScale, float currentTranslationY, float alpha) {
